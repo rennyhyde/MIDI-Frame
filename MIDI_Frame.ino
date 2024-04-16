@@ -1,5 +1,7 @@
 //MIDI Frame main code
-#Define DEBUG 0
+//#include <toneAC.h>
+
+#define DEBUG 0
 
 //Lightning Lipgloss Life MIDI as Array
 unsigned char Midi1[] = {
@@ -227,7 +229,10 @@ unsigned int Midi1_len = 2622;
 
 unsigned int Ptr, EndBlock; //MIDI parse pointer
 const int fs = 44100; //sample rate in Hz
-uint8_t audio*;  //pointer to audio array
+//uint8_t audio*;  //pointer to audio array
+long* midiNotes;  //Array of MIDI note vals
+float* midiDurs;  //Array of MIDI note durations corresponding to midiNotes
+unsigned int MPtr;
 const long MThd = 0x4D546864;
 const long MTrk = 0x4D54726B;
 unsigned long Tempo = 500000;    // Default - microseconds per beat; ie 120bpm
@@ -246,7 +251,7 @@ Read a number with n-byte precision, with n<=4
 */
 unsigned long readNumber(int n) {
   long result = 0;
-  for (int i=0; I<n; i++) {
+  for (int i=0; i<n; i++) {
     result = (result<<8) + pgm_read_byte(&Midi1[Ptr]);
   }
   return result;
@@ -267,12 +272,14 @@ unsigned long readVariable() {
 
 void genAudio(unsigned char MIDI[]) {
   Ptr = 0;            //Start at beginning of file
+  MPtr = 0;
   //Read header chunk
   unsigned long type = readNumber(4);     //Read first 4 bits of the MIDI file
   if (type != MThd && DEBUG) Serial.println("Error: MIDI file does not begin with header.");
   unsigned long len = readNumber(4);
   unsigned int format = readNumber(2);
   unsigned int tracks = readNumber(2);
+  tracks = 1; //I only care about the first track to make the MIDI note array generation easier
   unsigned int division = readNumber(2);  // Ticks per beat
   if (division & 0x80 && DEBUG) Serial.println("Error: Division is in SMPTE format.");
   TempoDivisor = (long)division*16000/Tempo;    //Not sure why 16000 and Tempo are hardcoded -- maybe you can change the tempo as you see fit
@@ -281,16 +288,54 @@ void genAudio(unsigned char MIDI[]) {
     //Read track chunk
     type = readNumber(4);
     if (type != MTrk && DEBUG) Serial.printf("Error: Track %d expected type [MTrk], got type %l", t, type);
-    len readNumber(4);
+    len =  readNumber(4);
     EndBlock= Ptr + len;
     //Parse track
     while (Ptr < EndBlock) {
-      unsigned long delta = readVariable();
+      unsigned long delta = readVariable();   //time delay since last event (or 0 if at beginning or simultaneous)
       uint8_t event = readNumber(1);
-      uint8_t eventType = event & 0xF0;
+      uint8_t eventType = event & 0xF0;   //MIDI message status must start with 1, data starts with 0
+      //Meta event
+      if (event == 0xFF) {
+        uint8_t mtype = readNumber(1);
+        uint8_t mlen = readNumber(1);
+        // Tempo
+        if (mtype == 0x51) {
+          Tempo = readNumber(mlen);   //Tempo is in units: microseconds/beat
+          TempoDivisor = (long)division*16000/Tempo;
+        // Ignore other meta events
+        } else {
+          readIgnore(mlen);
+        }
+      }
+      // Note off - ignored
+      else if (eventType == 0x80) {
+        uint8_t number = readNumber(1);
+        uint8_t velocity = readNumber(1);
+      // Note on
+      } else if (eventType == 0x90) {
+        uint8_t number = readNumber(1);
+        uint8_t velocity = readNumber(1); //discard velocity for now
+        //Play note
+        midiDurs[MPtr] = ((float)delta / (float)division) * (float)Tempo;  //Time in microseconds
+        midiNotes[MPtr++] = number;
+      // Polyphonic key pressure
+      } else if (eventType == 0xA0) readIgnore(2);
+      // Controller change
+      else if (eventType == 0xB0) readIgnore(2);
+      // Program change
+      else if (eventType == 0xC0) readIgnore(1);
+      // Channel key pressure
+      else if (eventType == 0xD0) readIgnore(1);
+      // Pitch bend
+      else if (eventType == 0xD0) readIgnore(2);
+      else if (DEBUG) Serial.println("Midi message eventType error: eventType not recognized.");
+    }
+    midiNotes[Ptr] = -1;  //Specify when midiNotes array ends
+    midiDurs[Ptr] = -1;
+
     }
   }
-}
 
 void setup() {
   // put your setup code here, to run once:
